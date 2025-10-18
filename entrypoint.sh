@@ -1,24 +1,44 @@
 #!/bin/sh
 set -e
 
-# Generate host keys if they don't exist (first run)
-if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
-    echo "Generating SSH host keys..."
-    ssh-keygen -A
-fi
+# ============================================================
+# SSH Reverse Proxy Server Initialization Script
+# ============================================================
 
-# Ensure proper permissions on host keys
-chmod 600 /etc/ssh/ssh_host_* 2>/dev/null || true
+# ------------------------------------------------------------
+# Generate SSH Host Keys
+# ------------------------------------------------------------
+generate_host_keys() {
+    if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
+        echo "[INFO] Generating SSH host keys..."
+        ssh-keygen -A
+        echo "[INFO] Host keys generated successfully"
+    else
+        echo "[INFO] SSH host keys already exist"
+    fi
+    
+    # Ensure proper permissions
+    chmod 600 /etc/ssh/ssh_host_* 2>/dev/null || true
+}
 
-# Generate sshd_config if it doesn't exist or is the default
-if [ ! -f /etc/ssh/sshd_config.configured ]; then
-    echo "Configuring SSH server..."
+# ------------------------------------------------------------
+# Configure SSH Server
+# ------------------------------------------------------------
+configure_sshd() {
+    if [ -f /etc/ssh/sshd_config.configured ]; then
+        echo "[INFO] SSH server already configured"
+        return
+    fi
     
-    # Backup original config
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak 2>/dev/null || true
+    echo "[INFO] Configuring SSH server..."
     
-    # Create secure sshd configuration
+    # Backup original configuration
+    [ -f /etc/ssh/sshd_config ] && \
+        cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+    
+    # Create secure configuration
     cat > /etc/ssh/sshd_config << 'EOF'
+# Logging
 LogLevel VERBOSE
 
 # Network
@@ -29,59 +49,81 @@ AddressFamily any
 PubkeyAuthentication yes
 PasswordAuthentication no
 PermitRootLogin no
-AuthorizedKeysFile      .ssh/authorized_keys
+AuthorizedKeysFile .ssh/authorized_keys
+MaxAuthTries 3
 
-# Forwarding
+# Port Forwarding
 AllowTcpForwarding yes
 GatewayPorts yes
 PermitTunnel no
 
-# Security - Disable interactive access
+# Security - Disable Interactive Access
 PermitTTY no
 X11Forwarding no
 AllowAgentForwarding no
 PermitUserEnvironment no
-
-# Force command to prevent shell access
 ForceCommand /bin/false
 
-# Session
+# Session Management
 ClientAliveInterval 60
 ClientAliveCountMax 3
-MaxAuthTries 3
 MaxSessions 10
 EOF
     
-    # Set proper permissions
     chmod 600 /etc/ssh/sshd_config
-    
-    # Mark as configured
     touch /etc/ssh/sshd_config.configured
-fi
+    
+    echo "[INFO] SSH server configured successfully"
+}
 
-# Check if authorized_keys exists at /home/sshrp/.ssh/authorized_keys
-if [ -f /home/sshrp/.ssh/authorized_keys ]; then
-    echo "Found authorized_keys at /home/sshrp/.ssh/authorized_keys"
-    # Note: If mounted as read-only, SSH will still work as long as permissions are correct
-    # SSH requires the file to be readable by root (since sshd runs as root)
-    # We only warn if we can't verify permissions, but don't fail
-    if [ -w /home/sshrp/.ssh/authorized_keys ]; then
-        echo "Set permissions on /home/sshrp/.ssh/authorized_keys"
-        if ! chmod 600 /home/sshrp/.ssh/authorized_keys; then
-            echo "WARNING: Failed to set permissions on /home/sshrp/.ssh/authorized_keys"
+# ------------------------------------------------------------
+# Validate Authorized Keys
+# ------------------------------------------------------------
+validate_authorized_keys() {
+    local auth_keys="/home/sshrp/.ssh/authorized_keys"
+    
+    if [ ! -f "$auth_keys" ]; then
+        echo "[WARNING] No authorized_keys file found at $auth_keys"
+        echo "[WARNING] Please mount your public key to $auth_keys"
+        return 1
+    fi
+    
+    echo "[INFO] Found authorized_keys at $auth_keys"
+    
+    # Attempt to set permissions if writable
+    if [ -w "$auth_keys" ]; then
+        if chmod 600 "$auth_keys" 2>/dev/null; then
+            echo "[INFO] Permissions set to 600 on $auth_keys"
+        else
+            echo "[WARNING] Failed to set permissions on $auth_keys"
         fi
     else
-        echo "Note: /home/sshrp/.ssh/authorized_keys is read-only (mounted with :ro flag)"
+        echo "[INFO] File is read-only (mounted with :ro flag)"
     fi
-else
-    echo "WARNING: No authorized_keys file found at /home/sshrp/.ssh/authorized_keys"
-    echo "Please mount your public key to /home/sshrp/.ssh/authorized_keys"
-fi
+}
 
-# Test sshd configuration
-echo "Testing sshd configuration..."
-/usr/sbin/sshd -t
+# ------------------------------------------------------------
+# Start SSH Daemon
+# ------------------------------------------------------------
+start_sshd() {
+    echo "[INFO] Testing SSH server configuration..."
+    if ! /usr/sbin/sshd -t; then
+        echo "[ERROR] SSH configuration test failed"
+        exit 1
+    fi
+    
+    echo "[INFO] Starting SSH server..."
+    exec /usr/sbin/sshd -D -e
+}
 
-# Start sshd
-echo "Starting SSH server..."
-exec /usr/sbin/sshd -D -e
+# ============================================================
+# Main Execution
+# ============================================================
+main() {
+    generate_host_keys
+    configure_sshd
+    validate_authorized_keys
+    start_sshd
+}
+
+main "$@"
